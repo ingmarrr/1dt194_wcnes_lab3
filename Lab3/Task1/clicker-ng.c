@@ -1,131 +1,205 @@
-
-#include <stdio.h>
-#include <string.h>
 #include "contiki.h"
+#include "net/nullnet/nullnet.h"
+#include "net/netstack.h"
 #include "dev/button-sensor.h"
 #include "dev/leds.h"
-#include "net/netstack.h"
-#include "net/nullnet/nullnet.h"
+#include <stdio.h>
 
-/*---------------------------------------------------------------------------*/
-PROCESS(clicker_ng_process, "Clicker NG Process");
-AUTOSTART_PROCESSES(&clicker_ng_process);
-/*---------------------------------------------------------------------------*/
+struct event {
+  clock_time_t time;
+  linkaddr_t addr;
+};
 
-typedef struct event {
-  clock_time_t	time;
-  linkaddr_t	addr;
-} event_t;
+#define MAX_NUMBER_OF_EVENTS 10
+#define EVENT_TIMEOUT (30 * CLOCK_SECOND)
+#define ALARM_CHECK_INTERVAL (CLOCK_SECOND)
 
-#define MAX_EV_NUM  3
-static event_t history[MAX_EV_NUM];
-static uint8_t history_index = 0;
+// Structure for the message payload
+struct click_msg {
+  linkaddr_t source;
+};
 
-void print_events(void)
-{
-	clock_time_t now = clock_time();
-	printf("Event History:\n");
-	uint8_t i = 0;
-	for (; i < history_index; i++) {
-		// Skip expired events (older than 30 seconds)
-		if (now - history[i].time > 30 * CLOCK_SECOND) {
-			continue;
-		}
-		
-		// Calculate time difference in seconds
-		uint32_t time_diff = (now - history[i].time) / CLOCK_SECOND;
-		
-		// Print event details: index, time ago in seconds, and source address
-		printf("[%u] %lu seconds ago from node %u\n", 
-			i,
-			time_diff,
-			history[i].addr.u8[0]);
-	}
-	
-	if (history_index == 0) {
-		printf("No events recorded\n");
-	}
-	printf("-----------------\n");
-}
+static struct event event_history[MAX_NUMBER_OF_EVENTS];
+// static struct click_msg msg_buf;
 
-void handle_event(const linkaddr_t* src)
-{
-	clock_time_t now = clock_time();
-	uint8_t ix = 0;
-	for (;ix < MAX_EV_NUM; ++ix)
-	{
-		if (now + 30 * CLOCK_SECOND < now) 
-		{
-			if (ix == MAX_EV_NUM - 1) break;
-			history[ix] = history[ix + 1];
-		}
-	}
+// Function prototypes
+static void input_callback(const void *data, uint16_t len,
+                          const linkaddr_t *src, const linkaddr_t *dest);
+static void handle_event(const linkaddr_t *src);
+static void check_alarm_status();
+static void print_event_history();
 
-	if (history_index < 3) {
-		history[history_index++] = (event_t) {
-			.time	= now,
-			.addr	= *src,
-		};
-	} else {
-		history[0] = history[1];
-		history[1] = history[2];
-		history[2] = (event_t) {
-			.time	= now,
-			.addr	= *src,
-		};
-	}
+PROCESS(clicker_process, "Clicker");
+AUTOSTART_PROCESSES(&clicker_process);
 
-	ix = 0;
-	for (;ix < MAX_EV_NUM; ++ix)
-	{
-		if (now + 30 * CLOCK_SECOND < now) 
-		{
-			return;
-		}
-	}
+static void input_callback(const void *data, uint16_t len,
+                          const linkaddr_t *src, const linkaddr_t *dest) {
+  if (len != sizeof(struct click_msg)) {
+    printf("Received malformed packet\n");
+    return;
+  }
 
-	leds_toggle(LEDS_YELLOW);
-}
-
-static void recv(
-  const void *data, 
-  uint16_t len,
-  const linkaddr_t *src, 
-  const linkaddr_t *dest
-) {
-	printf("Received: %s - from %d\n", (char*)data, src->u8[0]);
-	leds_toggle(LEDS_GREEN);
-	handle_event(src);
-}
-/*---------------------------------------------------------------------------*/
-PROCESS_THREAD(clicker_ng_process, ev, data)
-{
-	static char payload[] = "hej";
-
-	PROCESS_BEGIN();
-
-	/* Initialize NullNet */
-	nullnet_buf = (uint8_t*)&payload;
-	nullnet_len = sizeof(payload);
-	nullnet_set_input_callback(recv);
+  const struct click_msg *msg = data;
+  printf("Message received from %d.%d (source: %d.%d)\n", 
+         src->u8[0], src->u8[1],
+         msg->source.u8[0], msg->source.u8[1]);
   
-	/* Activate the button sensor. */
-	SENSORS_ACTIVATE(button_sensor);
-
-	while(1) 
-	{
-		PROCESS_WAIT_EVENT_UNTIL(ev == sensors_event &&data == &button_sensor);
-
-		leds_toggle(LEDS_RED);
-
-		memcpy(nullnet_buf, &payload, sizeof(payload));
-		nullnet_len = sizeof(payload);
-
-		/* Send the content of the packet buffer using the
-		* broadcast handle. */
-		NETSTACK_NETWORK.output(NULL);
-	}
-
-	PROCESS_END();
+  // Toggle the green LED (preserving original behavior)
+  leds_toggle(LEDS_GREEN);
+  
+  // Handle the event from the source indicated in the message
+  handle_event(&msg->source);
 }
-/*---------------------------------------------------------------------------*/
+
+static void handle_event(const linkaddr_t *src) {
+  clock_time_t current_time = clock_time();
+  int i;
+  int updated = 0;
+  
+  // First check if this node is already in our history
+  for (i = 0; i < MAX_NUMBER_OF_EVENTS; i++) {
+    if (event_history[i].time > 0 && 
+        linkaddr_cmp(&event_history[i].addr, src)) {
+      // Update the time
+      event_history[i].time = current_time;
+      updated = 1;
+      break;
+    }
+  }
+  
+  // If not found, add to history
+  if (!updated) {
+    // Find an empty slot or replace the oldest
+    int oldest_idx = 0;
+    clock_time_t oldest_time = event_history[0].time;
+    
+    for (i = 0; i < MAX_NUMBER_OF_EVENTS; i++) {
+      if (event_history[i].time == 0) {
+        oldest_idx = i;
+        break;
+      }
+      if (event_history[i].time < oldest_time) {
+        oldest_idx = i;
+        oldest_time = event_history[i].time;
+      }
+    }
+    
+    event_history[oldest_idx].time = current_time;
+    linkaddr_copy(&event_history[oldest_idx].addr, src);
+  }
+  
+  print_event_history();
+  check_alarm_status();
+}
+
+static void check_alarm_status() {
+  clock_time_t current_time = clock_time();
+  int recent_distinct_nodes = 0;
+  linkaddr_t recent_nodes[MAX_NUMBER_OF_EVENTS];
+  
+  // Count distinct nodes with recent events
+  int i;
+  for (i = 0; i < MAX_NUMBER_OF_EVENTS; i++) {
+    if (event_history[i].time == 0) {
+      continue;  // Skip empty slots
+    }
+    
+    // Check if event is recent
+    if (current_time - event_history[i].time <= EVENT_TIMEOUT) {
+      int is_new = 1;
+      
+      // Check if we've already counted this node
+      int j;
+      for (j = 0; j < recent_distinct_nodes; j++) {
+        if (linkaddr_cmp(&event_history[i].addr, &recent_nodes[j])) {
+          is_new = 0;
+          break;
+        }
+      }
+      
+      if (is_new) {
+        linkaddr_copy(&recent_nodes[recent_distinct_nodes], &event_history[i].addr);
+        recent_distinct_nodes++;
+      }
+    } else {
+      // Clear expired events
+      printf("Event from node %d.%d expired\n", 
+             event_history[i].addr.u8[0], 
+             event_history[i].addr.u8[1]);
+      event_history[i].time = 0;
+    }
+  }
+  
+  printf("Number of distinct nodes with recent events: %d\n", recent_distinct_nodes);
+  
+  // Trigger alarm if 3 or more distinct nodes have recent events
+  if (recent_distinct_nodes >= 3) {
+    leds_on(LEDS_YELLOW);
+    printf("ALARM TRIGGERED!\n");
+  } else {
+    leds_off(LEDS_YELLOW);
+    printf("No alarm\n");
+  }
+}
+
+static void print_event_history() {
+  printf("Event history:\n");
+  int i;
+  for (i = 0; i < MAX_NUMBER_OF_EVENTS; i++) {
+    if (event_history[i].time > 0) {
+      printf("[%d] Time: %lu, Node: %d.%d\n", 
+             i, 
+             (unsigned long)event_history[i].time,
+             event_history[i].addr.u8[0], 
+             event_history[i].addr.u8[1]);
+    }
+  }
+}
+
+PROCESS_THREAD(clicker_process, ev, data) {
+  PROCESS_BEGIN();
+
+  // Initialize nullnet
+  nullnet_set_input_callback(input_callback);
+  
+  SENSORS_ACTIVATE(button_sensor);
+  
+  // Initialize event history
+  int i;
+  for (i = 0; i < MAX_NUMBER_OF_EVENTS; i++) {
+    event_history[i].time = 0;
+  }
+  
+  static struct etimer alarm_timer;
+  etimer_set(&alarm_timer, ALARM_CHECK_INTERVAL);
+
+  while(1) {
+    PROCESS_WAIT_EVENT();
+    
+    if (ev == sensors_event && data == &button_sensor) {
+      printf("Button clicked on node %d.%d\n", 
+             linkaddr_node_addr.u8[0], 
+             linkaddr_node_addr.u8[1]);
+      
+      // Prepare and send a packet with source information
+      struct click_msg msg;
+      linkaddr_copy(&msg.source, &linkaddr_node_addr);
+      
+      // Set the nullnet buffer and send the message
+      nullnet_buf = (uint8_t *)&msg;
+      nullnet_len = sizeof(msg);
+      NETSTACK_NETWORK.output(NULL);
+      
+      // Handle the local event
+      handle_event(&linkaddr_node_addr);
+    }
+    
+    if (etimer_expired(&alarm_timer)) {
+      // Periodically check alarm status to turn off when events expire
+      check_alarm_status();
+      etimer_reset(&alarm_timer);
+    }
+  }
+  
+  PROCESS_END();
+}

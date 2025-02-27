@@ -6,16 +6,16 @@
 #include "net/netstack.h"
 #include "net/nullnet/nullnet.h"
 
-typedef struct event {
+typedef struct {
   clock_time_t time;
   linkaddr_t addr;
-} event_h;
+} event_t;
 
 #define MAX_NUMBER_OF_EVENTS 3
 #define EVENT_TIMEOUT (30 * CLOCK_SECOND)
 #define ALARM_CHECK_INTERVAL (CLOCK_SECOND)
 
-static struct event event_history[MAX_NUMBER_OF_EVENTS];
+static event_t event_history[MAX_NUMBER_OF_EVENTS];
 
 static void handle_event(const linkaddr_t *src);
 static void check_alarm_status();

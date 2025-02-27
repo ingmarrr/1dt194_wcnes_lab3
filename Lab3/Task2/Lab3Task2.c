@@ -7,20 +7,17 @@
 #include "net/routing/routing.h"
 #include "dev/leds.h"
 #include "net/routing/rpl-classic/rpl.h"
-#define DEBUG DEBUG_PRINT
 #include "net/ipv6/uip-debug.h"
-
 #include "sys/log.h"
+
 #define LOG_MODULE "App"
 #define LOG_LEVEL LOG_LEVEL_DBG
-
-#define CONNECTIVITY_TIMEOUT 30
-static clock_time_t last_parent_response = 0;
+#define DEBUG DEBUG_PRINT
+#define ROOT_NODE 1
 
 /*---------------------------------------------------------------------------*/
 PROCESS(node_process, "RPL Node");
 AUTOSTART_PROCESSES(&node_process);
-
 /*---------------------------------------------------------------------------*/
 PROCESS_THREAD(node_process, ev, data)
 {
@@ -28,7 +25,7 @@ PROCESS_THREAD(node_process, ev, data)
 
 	PROCESS_BEGIN();
 
-	is_coordinator = (node_id == 1);
+	is_coordinator = (node_id == ROOT_NODE);
 
 	if (is_coordinator) 
 	{
@@ -37,77 +34,54 @@ PROCESS_THREAD(node_process, ev, data)
 	}
 	NETSTACK_MAC.on();
 
-	{
-		static struct etimer et;
-		/* Print out routing tables every minute */
-		etimer_set(&et, CLOCK_SECOND * 10);
-		while(1) {
-			LOG_INFO("Routing entries: %u\n", uip_ds6_route_num_routes());
-			uip_ds6_route_t *route = uip_ds6_route_head();
-			LOG_INFO("[MODE] has joined: %u\n", NETSTACK_ROUTING.node_is_reachable());
-			LOG_INFO("[HEAD] is null: %u\n", route == NULL);
+	static struct etimer et;
+	/* Print out routing tables every 10 seconds */
+	etimer_set(&et, CLOCK_SECOND * 10);
 
-			//if (!is_coordinator) {
-			//	rpl_instance_t *instance = rpl_get_default_instance();
-                
-			//	if (instance != NULL) {
-			//	    // Check if we actually have a stable parent connection
-			//	    if (instance->current_dag != NULL && 
-			//		instance->current_dag->preferred_parent != NULL) {
-			//		
-			//		// Check if parent is responding (based on your app logic)
-			//		// This code attempts to detect actual connectivity
-			//		if (clock_seconds() - last_parent_response > CONNECTIVITY_TIMEOUT) {
-			//		    LOG_INFO("Parent hasn't responded for %u seconds, leaving DAG\n", 
-			//			CONNECTIVITY_TIMEOUT);
-			//		    
-			//		    // Force leaving the DAG - this is the key to reset joined status
-			//		    rpl_remove_parent(instance->current_dag, instance->current_dag->preferred_parent);
-			//		    rpl_set_default_instance(NULL);
-			//		    
-			//		    // Clear the routing table
-			//		    uip_ds6_route_t *r;
-			//		    while((r = uip_ds6_route_head()) != NULL) {
-			//			uip_ds6_route_rm(r);
-			//		    }
-			//		    
-			//		    leds_off(LEDS_YELLOW);
-			//		    leds_off(LEDS_RED);
-			//		}
-			//	    }
-			//	}
-			//}
+	while(1) {
+		is_coordinator = (node_id == ROOT_NODE);
+		if (is_coordinator == ROOT_NODE) {
+			LOG_INFO("I am the root node!\n");
+		} 
 
-			if (!is_coordinator) {
-				if (NETSTACK_ROUTING.node_is_reachable()) {
-					if (route != NULL) {
-						leds_off(LEDS_RED);
-						leds_on(LEDS_YELLOW);
-						last_parent_response = clock_seconds();
-					} else {
-						leds_off(LEDS_YELLOW);
-						leds_on(LEDS_RED);
-					} 			
-				} else {
-					NETSTACK_ROUTING.local_repair("the fuck");
-					leds_off(LEDS_YELLOW);
+		LOG_INFO("Routing entries: %u\n", uip_ds6_route_num_routes());
+		uip_ds6_route_t *route = uip_ds6_route_head();
+
+		if (!is_coordinator) {
+			if (NETSTACK_ROUTING.node_has_joined()) {
+				if (route != NULL && 
+					(NETSTACK_ROUTING.node_is_reachable() || !NETSTACK_ROUTING.node_is_reachable())) {
+					NETSTACK_ROUTING.local_repair("Intermediate Node");
 					leds_off(LEDS_RED);
-				}
+					leds_on(LEDS_YELLOW);
+					leds_off(LEDS_GREEN);
+				} else if (route == NULL && 
+						  (NETSTACK_ROUTING.node_is_reachable() || !NETSTACK_ROUTING.node_is_reachable())) {
+							NETSTACK_ROUTING.local_repair("Leaf Node");
+							leds_off(LEDS_YELLOW);
+							leds_on(LEDS_RED);
+							leds_off(LEDS_GREEN);
+				} 			
+			} else {
+				leds_off(LEDS_YELLOW);
+				leds_off(LEDS_RED);
+				leds_off(LEDS_GREEN);
 			}
-
-
-			while(route) {
-				LOG_INFO("Route ");
-				LOG_INFO_6ADDR(&route->ipaddr);
-				LOG_INFO_(" via ");
-				LOG_INFO_6ADDR(uip_ds6_route_nexthop(route));
-				LOG_INFO_("\n");
-				route = uip_ds6_route_next(route);
-			}
-			NETSTACK_ROUTING.global_repair("the fuck");
-			PROCESS_YIELD_UNTIL(etimer_expired(&et));
-			etimer_reset(&et);
+		}else {
+			leds_on(LEDS_GREEN);
 		}
+
+		while(route) {
+			LOG_INFO("Route ");
+			LOG_INFO_6ADDR(&route->ipaddr);
+			LOG_INFO_(" via ");
+			LOG_INFO_6ADDR(uip_ds6_route_nexthop(route));
+			LOG_INFO_("\n");
+			route = uip_ds6_route_next(route);
+		}
+
+		PROCESS_YIELD_UNTIL(etimer_expired(&et));
+		etimer_reset(&et);
 	}
 
 	PROCESS_END();
